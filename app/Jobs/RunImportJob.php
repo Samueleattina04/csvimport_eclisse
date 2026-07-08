@@ -3,7 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\ImportRun;
-use App\Services\Import\StagingImporter;
+use App\Services\Import\ImportPipeline;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -13,7 +13,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Wrapper queueable sottile: la logica vera vive in StagingImporter (testabile
+ * Wrapper queueable sottile: la logica vera vive in ImportPipeline (testabile
  * senza infrastruttura di coda). Non ritenta automaticamente: un import fallito
  * va rivisto, non rilanciato alla cieca dal sistema di code.
  */
@@ -35,12 +35,12 @@ class RunImportJob implements ShouldQueue
         return [(new WithoutOverlapping('import-run'))->dontRelease()];
     }
 
-    public function handle(StagingImporter $importer): void
+    public function handle(ImportPipeline $pipeline): void
     {
         $importRun = ImportRun::findOrFail($this->importRunId);
 
         try {
-            $importer->run($importRun);
+            $pipeline->run($importRun);
         } catch (\Throwable $e) {
             Log::error('Import CSV -> Shopify fallito', [
                 'import_run_id' => $importRun->id,

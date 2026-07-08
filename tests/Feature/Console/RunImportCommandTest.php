@@ -26,7 +26,10 @@ class RunImportCommandTest extends TestCase
 
         $run = ImportRun::first();
         $this->assertSame('manual', $run->trigger_type);
-        $this->assertSame('parsing', $run->status);
+        $this->assertSame('diffing', $run->status);
+        // Nessun prodotto esiste ancora in canonico: sono tutti nuovi.
+        $this->assertSame(9, $run->products_created);
+        $this->assertSame(0, $run->products_updated);
     }
 
     public function test_rifiuta_di_partire_se_un_import_e_gia_in_corso(): void

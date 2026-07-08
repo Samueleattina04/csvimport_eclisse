@@ -10,7 +10,7 @@ class RunImportCommand extends Command
 {
     protected $signature = 'import:run {--sync : Esegui subito nel processo corrente invece di accodare il job}';
 
-    protected $description = 'Avvia manualmente il download e il parsing del CSV Eclisse (fase attuale: fetch + staging, senza ancora diff/Shopify)';
+    protected $description = 'Avvia manualmente fetch + staging + diff del CSV Eclisse (fase attuale: nessuna chiamata a Shopify ancora)';
 
     public function handle(): int
     {
@@ -61,6 +61,16 @@ class RunImportCommand extends Command
 
         if ($run->error_message) {
             $this->error("Errore: {$run->error_message}");
+        }
+
+        if ($run->status === 'diffing') {
+            $this->line('');
+            $this->line('Diff calcolato rispetto all\'ultimo stato noto:');
+            $this->line("  Prodotti nuovi: {$run->products_created}");
+            $this->line("  Prodotti aggiornati: {$run->products_updated}");
+            $this->line("  Prodotti invariati: {$run->products_unchanged}");
+            $this->line("  Prodotti spariti dal CSV: {$run->products_removed}");
+            $this->line("  Varianti nuove/aggiornate/rimosse: {$run->variants_created}/{$run->variants_updated}/{$run->variants_removed}");
         }
 
         $warnings = $run->logs()->where('level', 'warning')->count();

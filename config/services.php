@@ -35,4 +35,13 @@ return [
         ],
     ],
 
+    'shopify' => [
+        // In Fase 1 punta allo store di sviluppo Shopify (gratuito); il passaggio
+        // allo store reale in Fase 2 e' un cambio esplicito di queste variabili
+        // d'ambiente, mai automatico.
+        'store_domain' => env('SHOPIFY_STORE_DOMAIN'),
+        'access_token' => env('SHOPIFY_ADMIN_API_ACCESS_TOKEN'),
+        'api_version' => env('SHOPIFY_API_VERSION', '2025-01'),
+    ],
+
 ];

@@ -35,14 +35,32 @@ class ImportPipelineTest extends TestCase
         $this->pipeline()->run($run);
         $run->refresh();
 
-        $this->assertSame('diffing', $run->status);
+        // Dry-run di default: il run si conclude qui, il piano E' il risultato.
+        $this->assertTrue((bool) $run->dry_run);
+        $this->assertContains($run->status, ['completed', 'completed_with_warnings']);
+        $this->assertNotNull($run->finished_at);
         $this->assertSame(9, $run->products_created);
         $this->assertSame(0, $run->products_updated);
         $this->assertSame(0, $run->products_unchanged);
         $this->assertSame(0, $run->products_removed);
         $this->assertSame(40, $run->variants_created);
 
-        // Il diff non tocca ancora lo stato canonico: sara' la fase di apply-to-Shopify a farlo.
+        // Il dry-run non tocca mai lo stato canonico: nessuna chiamata a Shopify e' avvenuta.
+        $this->assertDatabaseCount('products', 0);
+    }
+
+    public function test_una_run_live_fallisce_esplicitamente_perche_non_ancora_implementata(): void
+    {
+        $this->fakeCsvResponse();
+
+        $run = ImportRun::create(['trigger_type' => 'manual', 'status' => 'pending', 'dry_run' => false]);
+        $this->pipeline()->run($run);
+        $run->refresh();
+
+        $this->assertSame('failed', $run->status);
+        $this->assertStringContainsString('non ancora implementata', $run->error_message);
+        // Il piano e' comunque stato calcolato e i contatori popolati, solo non applicato.
+        $this->assertSame(9, $run->products_created);
         $this->assertDatabaseCount('products', 0);
     }
 

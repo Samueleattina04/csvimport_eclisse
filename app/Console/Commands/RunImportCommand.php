@@ -8,9 +8,11 @@ use Illuminate\Console\Command;
 
 class RunImportCommand extends Command
 {
-    protected $signature = 'import:run {--sync : Esegui subito nel processo corrente invece di accodare il job}';
+    protected $signature = 'import:run
+        {--sync : Esegui subito nel processo corrente invece di accodare il job}
+        {--live : Applica davvero le modifiche a Shopify. Senza questo flag il run e\' sempre dry-run: calcola e mostra il piano senza chiamare nessuna API}';
 
-    protected $description = 'Avvia manualmente fetch + staging + diff del CSV Eclisse (fase attuale: nessuna chiamata a Shopify ancora)';
+    protected $description = 'Avvia manualmente fetch + staging + diff (+ sync Shopify se --live) del CSV Eclisse';
 
     public function handle(): int
     {
@@ -24,9 +26,18 @@ class RunImportCommand extends Command
             return self::FAILURE;
         }
 
+        $live = (bool) $this->option('live');
+
+        if ($live) {
+            $this->warn('Modalita\' LIVE richiesta: al momento non e\' ancora implementata la sync reale verso Shopify, il run terminera\' con un errore esplicito.');
+        } else {
+            $this->info('Modalita\' dry-run (default): nessuna chiamata a Shopify verra\' effettuata.');
+        }
+
         $run = ImportRun::create([
             'trigger_type' => 'manual',
             'status' => 'pending',
+            'dry_run' => ! $live,
             'initiated_by_user_id' => null,
         ]);
 
@@ -44,7 +55,7 @@ class RunImportCommand extends Command
         $run->refresh();
         $this->reportResult($run);
 
-        return $run->status === 'failed' ? self::FAILURE : self::SUCCESS;
+        return in_array($run->status, ['failed'], true) ? self::FAILURE : self::SUCCESS;
     }
 
     private function reportResult(ImportRun $run): void
@@ -53,7 +64,7 @@ class RunImportCommand extends Command
         $this->line("Stato finale: <fg=yellow>{$run->status}</>");
         $this->line("Righe CSV lette: {$run->csv_row_count}");
         $this->line("Prodotti trovati: {$run->csv_product_count}");
-        $this->line("Prodotti falliti: {$run->products_failed}");
+        $this->line("Prodotti falliti in fase di parsing: {$run->products_failed}");
 
         if ($run->anomaly_detected) {
             $this->error("Anomalia rilevata: {$run->anomaly_reason}");
@@ -63,9 +74,9 @@ class RunImportCommand extends Command
             $this->error("Errore: {$run->error_message}");
         }
 
-        if ($run->status === 'diffing') {
+        if (in_array($run->status, ['completed', 'completed_with_warnings'], true)) {
             $this->line('');
-            $this->line('Diff calcolato rispetto all\'ultimo stato noto:');
+            $this->line($run->dry_run ? 'Piano dry-run (nessuna chiamata a Shopify effettuata):' : 'Sync applicata a Shopify:');
             $this->line("  Prodotti nuovi: {$run->products_created}");
             $this->line("  Prodotti aggiornati: {$run->products_updated}");
             $this->line("  Prodotti invariati: {$run->products_unchanged}");
@@ -75,6 +86,7 @@ class RunImportCommand extends Command
 
         $warnings = $run->logs()->where('level', 'warning')->count();
         $errors = $run->logs()->where('level', 'error')->count();
-        $this->line("Log: {$warnings} warning, {$errors} error (dettaglio nella tabella import_logs).");
+        $this->line('');
+        $this->line("Log: {$warnings} warning, {$errors} error (dettaglio nella tabella import_logs, filtrabile per import_run_id={$run->id}).");
     }
 }

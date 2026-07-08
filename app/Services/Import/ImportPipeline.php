@@ -11,9 +11,14 @@ use Illuminate\Support\Str;
 
 /**
  * Mette in sequenza le fasi della sync: staging (fetch+parsing) e poi diff.
- * Si ferma qui di proposito: applicare il diff a Shopify e' la fase
- * successiva, non ancora costruita. A fine corsa senza anomalie il run resta
- * in stato "diffing", con il piano gia' calcolato pronto per essere applicato.
+ *
+ * In modalita' dry-run (il default, sempre finche' non lo si disattiva
+ * esplicitamente) il run si conclude qui: il diff e i log gia' scritti SONO
+ * il report dry-run richiesto ("cosa farebbe senza chiamare le API"), quindi
+ * non c'e' nient'altro da eseguire. La chiamata vera a Shopify e' una fase
+ * successiva non ancora costruita: se viene richiesta una run non-dry-run,
+ * il run viene marcato "failed" con un messaggio esplicito invece di
+ * lasciarlo in un limbo o fingere un sync che non e' mai avvenuto.
  */
 class ImportPipeline
 {
@@ -49,7 +54,31 @@ class ImportPipeline
             'variants_removed' => $diffResult->variantsRemoved,
         ])->save();
 
+        if ($importRun->dry_run) {
+            $this->finalizeDryRun($importRun);
+
+            return $importRun->refresh();
+        }
+
+        $importRun->forceFill([
+            'status' => 'failed',
+            'error_message' => 'Sync live verso Shopify non ancora implementata: rilancia in modalita\' dry-run (default).',
+            'finished_at' => now(),
+            'duration_seconds' => $importRun->started_at ? now()->diffInSeconds($importRun->started_at) : null,
+        ])->save();
+
         return $importRun->refresh();
+    }
+
+    private function finalizeDryRun(ImportRun $importRun): void
+    {
+        $hasIssues = $importRun->logs()->whereIn('level', ['warning', 'error'])->exists();
+
+        $importRun->forceFill([
+            'status' => $hasIssues ? 'completed_with_warnings' : 'completed',
+            'finished_at' => now(),
+            'duration_seconds' => $importRun->started_at ? now()->diffInSeconds($importRun->started_at) : null,
+        ])->save();
     }
 
     private function logDiff(ImportRun $importRun, DiffResult $diffResult): void

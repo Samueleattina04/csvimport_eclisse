@@ -87,7 +87,7 @@ class ImportPipeline
         $importRun->forceFill(['status' => 'syncing'])->save();
         $importRunId = $importRun->id;
 
-        Bus::batch($jobs)
+        $batch = Bus::batch($jobs)
             ->allowFailures()
             ->name("import-run-{$importRunId}-sync")
             ->finally(function (Batch $batch) use ($importRunId) {
@@ -97,6 +97,8 @@ class ImportPipeline
                 }
             })
             ->dispatch();
+
+        $importRun->forceFill(['batch_id' => $batch->id])->save();
     }
 
     private function finalize(ImportRun $importRun, int $additionalFailures): void

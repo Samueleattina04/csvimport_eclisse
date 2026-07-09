@@ -2,10 +2,12 @@
 
 namespace App\Models;
 
+use Illuminate\Bus\Batch;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Bus as BusFacade;
 
 class ImportRun extends Model
 {
@@ -23,6 +25,7 @@ class ImportRun extends Model
     protected $fillable = [
         'trigger_type',
         'status',
+        'batch_id',
         'dry_run',
         'initiated_by_user_id',
         'rollback_of_import_run_id',
@@ -90,5 +93,30 @@ class ImportRun extends Model
     public function isSuccessful(): bool
     {
         return in_array($this->status, ['completed', 'completed_with_warnings'], true);
+    }
+
+    public function batch(): ?Batch
+    {
+        return $this->batch_id ? BusFacade::findBatch($this->batch_id) : null;
+    }
+
+    /**
+     * @return array{total: int, processed: int, failed: int, percent: int}|null
+     */
+    public function syncProgress(): ?array
+    {
+        $batch = $this->batch();
+        if ($batch === null || $batch->totalJobs === 0) {
+            return null;
+        }
+
+        $processed = $batch->totalJobs - $batch->pendingJobs;
+
+        return [
+            'total' => $batch->totalJobs,
+            'processed' => $processed,
+            'failed' => $batch->failedJobs,
+            'percent' => (int) round(($processed / $batch->totalJobs) * 100),
+        ];
     }
 }

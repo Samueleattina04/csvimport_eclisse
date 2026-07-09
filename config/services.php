@@ -44,4 +44,14 @@ return [
         'api_version' => env('SHOPIFY_API_VERSION', '2025-01'),
     ],
 
+    'backup' => [
+        // rclone deve gia' avere il remote configurato sulla macchina (rclone
+        // config), con le credenziali OAuth di Google Drive: qui passa solo il
+        // nome del remote + percorso, mai un segreto.
+        'rclone_binary' => env('BACKUP_RCLONE_BINARY', 'rclone'),
+        'rclone_remote' => env('BACKUP_RCLONE_REMOTE'),
+        'mysqldump_binary' => env('BACKUP_MYSQLDUMP_BINARY', 'mysqldump'),
+        'retention_days' => (int) env('BACKUP_RETENTION_DAYS', 30),
+    ],
+
 ];

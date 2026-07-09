@@ -33,6 +33,9 @@
              i test che ne hanno bisogno le impostano esplicitamente via config() nel proprio setUp. -->
         <env name="SHOPIFY_STORE_DOMAIN" value=""/>
         <env name="SHOPIFY_ADMIN_API_ACCESS_TOKEN" value=""/>
+        <!-- Idem per il remote rclone: i test che esercitano backup:run fanno sempre
+             Process::fake(), mai un vero mysqldump/rclone contro l'ambiente dello sviluppatore. -->
+        <env name="BACKUP_RCLONE_REMOTE" value=""/>
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>

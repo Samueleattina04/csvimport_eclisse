@@ -10,6 +10,7 @@ use App\Services\Diff\Dto\VariantDiff;
 use App\Services\Shopify\Support\CategoryPathParser;
 use App\Services\Shopify\Support\ShopifyGid;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Applica UN ProductDiff a Shopify (create/update/remove) e, solo dopo che la
@@ -125,14 +126,22 @@ class ProductSyncer
             );
         }
 
+        // "tracked" va impostato esplicitamente: la variante di default creata da
+        // Shopify insieme al prodotto NON ha il tracciamento scorte attivo di
+        // default (risultato: "Scorte non monitorate" nell'admin, verificato
+        // contro il dev store), a differenza di quelle create via bulkCreate dove
+        // lo impostiamo gia' esplicitamente.
         $result = $this->client->call(
             self::VARIANTS_BULK_UPDATE_MUTATION,
-            ['productId' => $shopifyProductGid, 'variants' => [array_filter([
+            ['productId' => $shopifyProductGid, 'variants' => [[
                 'id' => $autoVariant['id'],
                 'price' => $variantDiff->staging['price'],
                 'barcode' => $variantDiff->codiceEan,
-                'inventoryItem' => $variantDiff->staging['cost'] !== null ? ['cost' => $variantDiff->staging['cost']] : null,
-            ], fn ($v) => $v !== null)]],
+                'inventoryItem' => array_filter([
+                    'tracked' => true,
+                    'cost' => $variantDiff->staging['cost'],
+                ], fn ($v) => $v !== null),
+            ]]],
             'productVariantsBulkUpdate',
             $importRun->id,
             $product->codice_articolo,
@@ -445,14 +454,29 @@ class ProductSyncer
     {
         $result = $this->client->call(
             self::PRODUCT_CREATE_MEDIA_MUTATION,
-            ['productId' => $shopifyProductGid, 'media' => [['originalSource' => $url, 'mediaContentType' => 'IMAGE']]],
+            ['productId' => $shopifyProductGid, 'media' => [['originalSource' => $this->sanitizeImageUrl($url), 'mediaContentType' => 'IMAGE']]],
             'productCreateMedia',
             $importRun->id,
             $product->codice_articolo,
         );
 
-        // Un'immagine fallita non deve bloccare la creazione dell'intero prodotto.
+        // Un'immagine fallita non deve bloccare la creazione dell'intero prodotto,
+        // ma va comunque segnalata (non ignorata in silenzio: verificato contro il
+        // dev store che un URL non valido puo' "riuscire" a livello di risposta
+        // HTTP pur non allegando nessuna immagine, vedi ShopifyGraphQLClient).
         if (! $result->success) {
+            DB::table('import_logs')->insert([
+                'import_run_id' => $importRun->id,
+                'level' => 'warning',
+                'codice_articolo' => $product->codice_articolo,
+                'codice_ean' => null,
+                'csv_row_number' => null,
+                'message' => "Caricamento immagine fallito per {$product->codice_articolo}: ".($result->firstErrorMessage() ?? 'errore sconosciuto.')." (URL: {$url})",
+                'context' => null,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
             return;
         }
 
@@ -464,6 +488,37 @@ class ProductSyncer
                 'position' => 0,
             ]);
         }
+    }
+
+    /**
+     * Shopify scarica lui stesso l'immagine dall'URL fornito: se il path contiene
+     * caratteri non validi in un URL (spazi, parentesi, ecc. - capitano nei nomi
+     * file del gestionale) la richiesta fallisce con "Image URL is invalid".
+     * Si decodifica e ri-codifica ogni segmento del path per renderlo valido
+     * anche se gia' (parzialmente) codificato.
+     */
+    private function sanitizeImageUrl(string $url): string
+    {
+        $parts = parse_url($url);
+        if ($parts === false || ! isset($parts['scheme'], $parts['host'], $parts['path'])) {
+            return $url;
+        }
+
+        $encodedPath = implode('/', array_map(
+            fn (string $segment) => rawurlencode(rawurldecode($segment)),
+            explode('/', $parts['path']),
+        ));
+
+        $sanitized = "{$parts['scheme']}://{$parts['host']}";
+        if (isset($parts['port'])) {
+            $sanitized .= ":{$parts['port']}";
+        }
+        $sanitized .= $encodedPath;
+        if (isset($parts['query'])) {
+            $sanitized .= "?{$parts['query']}";
+        }
+
+        return $sanitized;
     }
 
     private function setInventory(ImportRun $importRun, string $codiceArticolo, array $quantities): void

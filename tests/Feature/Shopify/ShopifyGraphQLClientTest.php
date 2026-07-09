@@ -83,6 +83,32 @@ class ShopifyGraphQLClientTest extends TestCase
         $this->assertSame('Il titolo non puo\' essere vuoto', $result->firstErrorMessage());
     }
 
+    /**
+     * Non tutte le mutation Shopify chiamano il campo errori "userErrors": ad
+     * esempio productCreateMedia usa "mediaUserErrors". Verificato contro il dev
+     * store: un URL immagine non valido tornava mediaUserErrors non intercettato
+     * da un controllo che cercava solo "userErrors" alla lettera, quindi la
+     * chiamata risultava "riuscita" pur non avendo allegato nessuna immagine.
+     */
+    public function test_riconosce_campi_errori_con_nome_diverso_da_usererrors(): void
+    {
+        Http::fake([
+            'test-store.myshopify.com/*' => Http::response([
+                'data' => [
+                    'productCreateMedia' => [
+                        'media' => [],
+                        'mediaUserErrors' => [['field' => ['media', '0', 'originalSource'], 'message' => 'Image URL is invalid']],
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $result = $this->client()->call('mutation {...}', [], 'productCreateMedia');
+
+        $this->assertFalse($result->success);
+        $this->assertSame('Image URL is invalid', $result->firstErrorMessage());
+    }
+
     public function test_riprova_quando_shopify_risponde_throttled_e_poi_va_a_buon_fine(): void
     {
         $callCount = 0;

@@ -119,7 +119,12 @@ class ShopifyGraphQLClient
 
     /**
      * Le mutation Shopify restituiscono convenzionalmente un campo "userErrors"
-     * dentro il payload della mutation stessa (es. data.productCreate.userErrors).
+     * dentro il payload della mutation stessa (es. data.productCreate.userErrors),
+     * ma alcune (es. productCreateMedia) usano un nome diverso per lo stesso scopo
+     * (es. "mediaUserErrors"): controllare solo "userErrors" alla lettera fa
+     * passare per riusciti errori applicativi reali (verificato contro il dev
+     * store: un URL immagine non valido tornava "mediaUserErrors" non intercettato,
+     * quindi loggato come successo mentre nessuna immagine veniva davvero allegata).
      */
     private function extractUserErrors(?array $data): array
     {
@@ -129,8 +134,13 @@ class ShopifyGraphQLClient
 
         $userErrors = [];
         foreach ($data as $payload) {
-            if (is_array($payload) && is_array($payload['userErrors'] ?? null)) {
-                array_push($userErrors, ...$payload['userErrors']);
+            if (! is_array($payload)) {
+                continue;
+            }
+            foreach ($payload as $key => $value) {
+                if (str_ends_with(strtolower((string) $key), 'usererrors') && is_array($value)) {
+                    array_push($userErrors, ...$value);
+                }
             }
         }
 

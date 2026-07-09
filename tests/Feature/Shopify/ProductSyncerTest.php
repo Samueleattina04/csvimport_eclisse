@@ -205,6 +205,55 @@ class ProductSyncerTest extends TestCase
         });
     }
 
+    /**
+     * La variante di default creata da Shopify insieme al prodotto NON ha il
+     * tracciamento scorte attivo di default (l'admin la mostra come "Scorte non
+     * monitorate", verificato contro il dev store): il claim deve attivarlo
+     * esplicitamente, non solo le varianti create via bulkCreate.
+     */
+    public function test_la_variante_di_default_riceve_il_tracciamento_scorte_esplicito(): void
+    {
+        $this->fakeSuccessfulShopifyResponses();
+
+        // '000NM2399' ha una sola variante: e' interamente quella "di default".
+        $diff = (new DiffEngine)->diffSingleProduct($this->run->id, '000NM2399');
+        $this->syncer()->sync($this->run, $diff);
+
+        Http::assertSent(function (Request $request) {
+            if ($this->operationName($request) !== 'ProductVariantsBulkUpdate') {
+                return true;
+            }
+
+            $variant = collect($request->data()['variables']['variants'])->first();
+
+            return ($variant['inventoryItem']['tracked'] ?? null) === true;
+        });
+    }
+
+    /**
+     * I nomi file del gestionale a volte contengono spazi (es. "download -
+     * 2026-05-25T105024.398.jpg", presente in '12278618'): un URL con spazi non
+     * codificati viene rifiutato da Shopify con "Image URL is invalid" e nessuna
+     * immagine viene allegata, senza che il resto del prodotto fallisca.
+     */
+    public function test_gli_spazi_nellurl_immagine_vengono_codificati_prima_di_chiamare_shopify(): void
+    {
+        $this->fakeSuccessfulShopifyResponses();
+
+        $diff = (new DiffEngine)->diffSingleProduct($this->run->id, '12278618');
+        $this->syncer()->sync($this->run, $diff);
+
+        Http::assertSent(function (Request $request) {
+            if ($this->operationName($request) !== 'ProductCreateMedia') {
+                return true;
+            }
+
+            $url = collect($request->data()['variables']['media'])->first()['originalSource'];
+
+            return ! str_contains($url, ' ') && str_contains($url, '105024.398.jpg');
+        });
+    }
+
     public function test_un_prodotto_creato_fallisce_e_non_scrive_nulla_in_canonico(): void
     {
         Http::fake(function (Request $request) {

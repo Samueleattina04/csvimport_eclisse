@@ -49,19 +49,40 @@ class ImportPipelineTest extends TestCase
         $this->assertDatabaseCount('products', 0);
     }
 
-    public function test_una_run_live_fallisce_esplicitamente_perche_non_ancora_implementata(): void
+    public function test_una_run_live_senza_credenziali_shopify_fallisce_prodotto_per_prodotto_senza_bloccarsi(): void
     {
+        // Nessuna credenziale Shopify configurata in questo ambiente: ogni job
+        // fallira' con ShopifyNotConfiguredException, ma il batch continua
+        // (allowFailures) invece di bloccarsi al primo prodotto.
+        //
+        // Il driver "sync" (default nei test) rilancia l'eccezione del PRIMO job
+        // fallito interrompendo il ciclo di dispatch dell'intero batch: e' un
+        // limite noto del driver sync (SyncQueue::handleException fa "throw $e"
+        // dopo aver comunque registrato il fallimento), non del nostro codice.
+        // Un vero worker (php artisan queue:work, quello usato in produzione)
+        // isola le eccezioni job per job, quindi qui passiamo al driver
+        // "database" + un vero giro di queue:work per validare il comportamento
+        // reale invece di quello (fuorviante) del driver sync.
+        config(['queue.default' => 'database']);
         $this->fakeCsvResponse();
 
         $run = ImportRun::create(['trigger_type' => 'manual', 'status' => 'pending', 'dry_run' => false]);
         $this->pipeline()->run($run);
         $run->refresh();
 
-        $this->assertSame('failed', $run->status);
-        $this->assertStringContainsString('non ancora implementata', $run->error_message);
-        // Il piano e' comunque stato calcolato e i contatori popolati, solo non applicato.
-        $this->assertSame(9, $run->products_created);
-        $this->assertDatabaseCount('products', 0);
+        $this->assertSame('syncing', $run->status);
+
+        $this->artisan('queue:work', ['--stop-when-empty' => true, '--tries' => 1]);
+        $run->refresh();
+
+        $this->assertSame('completed_with_warnings', $run->status);
+        $this->assertSame(9, $run->products_created); // il piano resta quello calcolato dal diff
+        $this->assertSame(9, $run->products_failed); // tutti e 9 falliti per mancanza di credenziali
+        $this->assertDatabaseCount('products', 0); // nessuna scrittura canonica senza successo Shopify
+        $this->assertDatabaseHas('import_logs', [
+            'import_run_id' => $run->id,
+            'level' => 'error',
+        ]);
     }
 
     public function test_scrive_un_log_leggibile_per_ogni_prodotto_nuovo(): void

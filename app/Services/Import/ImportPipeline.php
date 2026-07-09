@@ -2,23 +2,29 @@
 
 namespace App\Services\Import;
 
+use App\Jobs\SyncProductToShopifyJob;
 use App\Models\ImportRun;
 use App\Services\Diff\DiffEngine;
 use App\Services\Diff\Dto\DiffResult;
 use App\Services\Diff\Dto\ProductDiff;
+use Illuminate\Bus\Batch;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 /**
- * Mette in sequenza le fasi della sync: staging (fetch+parsing) e poi diff.
+ * Mette in sequenza le fasi della sync: staging (fetch+parsing), diff, e
+ * (solo se non e' dry-run) applicazione a Shopify.
  *
  * In modalita' dry-run (il default, sempre finche' non lo si disattiva
- * esplicitamente) il run si conclude qui: il diff e i log gia' scritti SONO
- * il report dry-run richiesto ("cosa farebbe senza chiamare le API"), quindi
- * non c'e' nient'altro da eseguire. La chiamata vera a Shopify e' una fase
- * successiva non ancora costruita: se viene richiesta una run non-dry-run,
- * il run viene marcato "failed" con un messaggio esplicito invece di
- * lasciarlo in un limbo o fingere un sync che non e' mai avvenuto.
+ * esplicitamente) il run si conclude subito dopo il diff: il piano e i log
+ * gia' scritti SONO il report dry-run richiesto ("cosa farebbe senza
+ * chiamare le API"). In modalita' live, un job per prodotto (uno per ogni
+ * voce del diff diversa da "unchanged") viene accodato in un Bus::batch:
+ * ogni prodotto e' un'unita' di lavoro piccola e indipendente, cosi' un
+ * fallimento su un singolo prodotto non blocca gli altri e, se il worker si
+ * interrompe a meta', i job non ancora eseguiti restano in coda pronti per
+ * riprendere - nessuno stato "a meta'" nascosto.
  */
 class ImportPipeline
 {
@@ -60,14 +66,47 @@ class ImportPipeline
             return $importRun->refresh();
         }
 
+        $this->dispatchLiveSync($importRun, $diffResult);
+
+        return $importRun->refresh();
+    }
+
+    private function dispatchLiveSync(ImportRun $importRun, DiffResult $diffResult): void
+    {
+        $jobs = collect($diffResult->products)
+            ->filter(fn (ProductDiff $p) => $p->action !== 'unchanged')
+            ->map(fn (ProductDiff $p) => new SyncProductToShopifyJob($importRun->id, $p->codiceArticolo))
+            ->all();
+
+        if ($jobs === []) {
+            $this->finalize($importRun, additionalFailures: 0);
+
+            return;
+        }
+
+        $importRun->forceFill(['status' => 'syncing'])->save();
+        $importRunId = $importRun->id;
+
+        Bus::batch($jobs)
+            ->allowFailures()
+            ->name("import-run-{$importRunId}-sync")
+            ->finally(function (Batch $batch) use ($importRunId) {
+                $run = ImportRun::find($importRunId);
+                if ($run !== null) {
+                    $this->finalize($run, additionalFailures: $batch->failedJobs);
+                }
+            })
+            ->dispatch();
+    }
+
+    private function finalize(ImportRun $importRun, int $additionalFailures): void
+    {
         $importRun->forceFill([
-            'status' => 'failed',
-            'error_message' => 'Sync live verso Shopify non ancora implementata: rilancia in modalita\' dry-run (default).',
+            'status' => $additionalFailures > 0 ? 'completed_with_warnings' : 'completed',
+            'products_failed' => $importRun->products_failed + $additionalFailures,
             'finished_at' => now(),
             'duration_seconds' => $importRun->started_at ? now()->diffInSeconds($importRun->started_at) : null,
         ])->save();
-
-        return $importRun->refresh();
     }
 
     private function finalizeDryRun(ImportRun $importRun): void

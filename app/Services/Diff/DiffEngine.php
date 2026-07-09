@@ -73,6 +73,35 @@ class DiffEngine
     }
 
     /**
+     * Ricalcola il diff per UN SOLO prodotto, senza caricare l'intero catalogo.
+     * Usato dai job di sync per rileggere dati freschi al momento dell'esecuzione
+     * invece di far viaggiare l'intero DiffResult nel payload della coda.
+     */
+    public function diffSingleProduct(int $importRunId, string $codiceArticolo): ?ProductDiff
+    {
+        $stagingProduct = StagingProduct::query()
+            ->where('import_run_id', $importRunId)
+            ->where('codice_articolo', $codiceArticolo)
+            ->with('variants')
+            ->first();
+
+        $existingProduct = Product::query()
+            ->where('codice_articolo', $codiceArticolo)
+            ->with('variants')
+            ->first();
+
+        if ($stagingProduct === null && $existingProduct === null) {
+            return null;
+        }
+
+        if ($stagingProduct === null) {
+            return $this->diffRemovedProduct($existingProduct);
+        }
+
+        return $this->diffProduct($stagingProduct, $stagingProduct->variants, $existingProduct);
+    }
+
+    /**
      * @param  Collection<int, StagingVariant>  $stagingVariants
      */
     private function diffProduct(StagingProduct $stagingProduct, $stagingVariants, ?Product $existingProduct): ProductDiff
@@ -204,6 +233,7 @@ class DiffEngine
     {
         return [
             'shopify_variant_id' => $v->shopify_variant_id,
+            'shopify_inventory_item_id' => $v->shopify_inventory_item_id,
             'color' => $v->color,
             'size' => $v->size,
             'length' => $v->length,

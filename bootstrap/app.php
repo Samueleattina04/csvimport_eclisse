@@ -33,4 +33,13 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->command('backup:run')
             ->dailyAt('03:30')
             ->withoutOverlapping();
+
+        // Simula un worker persistente su hosting che non ne permette uno
+        // (jailed, niente Supervisor): un giro corto ogni minuto che processa
+        // tutto cio' che e' in coda (import, sync Shopify, rollback) e poi
+        // esce da solo. "max-time" lo ferma comunque prima del giro successivo,
+        // cosi' non si accumulano processi anche se una singola coda fosse lenta.
+        $schedule->command('queue:work --stop-when-empty --tries=1 --max-time=50')
+            ->everyMinute()
+            ->withoutOverlapping();
     })->create();

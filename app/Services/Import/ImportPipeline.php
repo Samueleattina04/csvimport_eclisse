@@ -124,7 +124,7 @@ class ImportPipeline
             'status' => $additionalFailures > 0 ? 'completed_with_warnings' : 'completed',
             'products_failed' => $importRun->products_failed + $additionalFailures,
             'finished_at' => now(),
-            'duration_seconds' => $importRun->started_at ? now()->diffInSeconds($importRun->started_at) : null,
+            'duration_seconds' => $importRun->secondsSinceStart(),
         ])->save();
 
         // Solo run live: e' lo stato che finisce davvero su Shopify, quindi e'
@@ -141,7 +141,7 @@ class ImportPipeline
         $importRun->forceFill([
             'status' => $hasIssues ? 'completed_with_warnings' : 'completed',
             'finished_at' => now(),
-            'duration_seconds' => $importRun->started_at ? now()->diffInSeconds($importRun->started_at) : null,
+            'duration_seconds' => $importRun->secondsSinceStart(),
         ])->save();
 
         $this->notifier->notify($importRun);

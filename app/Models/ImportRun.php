@@ -95,6 +95,21 @@ class ImportRun extends Model
         return in_array($this->status, ['completed', 'completed_with_warnings'], true);
     }
 
+    /**
+     * Secondi trascorsi da "started_at" ad adesso, come intero non negativo
+     * per la colonna unsignedInteger "duration_seconds". Da Carbon 3,
+     * diffInSeconds() di default e' firmato e restituisce un float
+     * (comportamento diverso da Carbon 2): senza "absolute: true" e un cast
+     * esplicito, un ordine "sbagliato" degli argomenti produce un numero
+     * negativo con decimali che MySQL rifiuta su una colonna unsigned.
+     */
+    public function secondsSinceStart(): ?int
+    {
+        return $this->started_at
+            ? (int) round($this->started_at->diffInSeconds(now(), absolute: true))
+            : null;
+    }
+
     public function batch(): ?Batch
     {
         return $this->batch_id ? BusFacade::findBatch($this->batch_id) : null;

@@ -99,7 +99,7 @@ class RollbackStagingImporter
             'status' => 'failed',
             'error_message' => $message,
             'finished_at' => now(),
-            'duration_seconds' => $importRun->started_at ? now()->diffInSeconds($importRun->started_at) : null,
+            'duration_seconds' => $importRun->secondsSinceStart(),
         ])->save();
 
         $importRun->logs()->create([

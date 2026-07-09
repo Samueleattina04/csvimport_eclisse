@@ -236,7 +236,7 @@ class StagingImporter
             'anomaly_detected' => $anomaly,
             'anomaly_reason' => $anomaly ? $message : $importRun->anomaly_reason,
             'finished_at' => now(),
-            'duration_seconds' => $importRun->started_at ? now()->diffInSeconds($importRun->started_at) : null,
+            'duration_seconds' => $importRun->secondsSinceStart(),
         ])->save();
 
         $this->insertLogs($importRun, [ParseLogEntry::error($message)]);

@@ -45,6 +45,12 @@ class ProductSyncer
     {
         $staging = $diff->staging;
         $collectionIds = $this->resolveCollectionIds($staging['category_path'] ?? null, $importRun);
+        $created = array_values(array_filter($diff->variants, fn (VariantDiff $v) => $v->action !== 'remove'));
+        // Decisa UNA volta sull'intero prodotto: se anche una sola variante ha una
+        // lunghezza, "Lunghezza" e' un'opzione del prodotto e OGNI variante (anche
+        // quelle senza) deve dichiararle un valore, non solo quelle passate a
+        // createVariants() in questa chiamata (la prima viene gestita a parte, vedi sotto).
+        $hasLength = collect($created)->contains(fn (VariantDiff $v) => ! empty($v->staging['length']));
 
         $input = [
             'title' => $staging['title'],
@@ -52,14 +58,15 @@ class ProductSyncer
             'descriptionHtml' => $staging['body_html'],
             'vendor' => $staging['vendor'],
             'status' => $this->shopifyStatus($staging['status']),
-            'productOptions' => $this->buildProductOptions($diff->variants),
+            'productOptions' => $this->buildProductOptions($created, $hasLength),
             'collectionsToJoin' => $collectionIds,
         ];
 
         $result = $this->client->call(self::PRODUCT_CREATE_MUTATION, ['input' => $input], 'productCreate', $importRun->id, $diff->codiceArticolo);
         $this->assertSuccess($result, "Creazione prodotto {$diff->codiceArticolo}");
 
-        $shopifyProductGid = $result->data['productCreate']['product']['id'];
+        $productNode = $result->data['productCreate']['product'];
+        $shopifyProductGid = $productNode['id'];
 
         $product = Product::create([
             'codice_articolo' => $diff->codiceArticolo,
@@ -79,12 +86,82 @@ class ProductSyncer
             'last_synced_at' => now(),
         ]);
 
-        $created = array_filter($diff->variants, fn (VariantDiff $v) => $v->action !== 'remove');
-        $this->createVariants($importRun, $product, $shopifyProductGid, $created);
+        // Contestualmente al prodotto, Shopify crea gia' in automatico UNA variante
+        // "di default" (la combinazione del primo valore di ciascuna opzione): per
+        // come costruiamo le liste di valori (la prima riga del gruppo contribuisce
+        // il primo valore a ciascuna opzione) corrisponde sempre alla prima variante
+        // del nostro elenco. Va aggiornata (non ricreata) o Shopify la rifiuta come
+        // duplicato ("variant already exists").
+        $autoVariant = $productNode['variants']['nodes'][0] ?? null;
+        $remaining = $created;
+        if ($autoVariant !== null && $created !== []) {
+            array_shift($remaining);
+            $this->claimAutoCreatedVariant($importRun, $product, $shopifyProductGid, $autoVariant, $created[0], $hasLength);
+        }
+
+        $this->createVariants($importRun, $product, $shopifyProductGid, $remaining, $hasLength);
 
         if ($staging['main_image_url']) {
             $this->attachImage($importRun, $product, $shopifyProductGid, $staging['main_image_url']);
         }
+    }
+
+    /**
+     * @param  array{id: string, selectedOptions: list<array{name: string, value: string}>, inventoryItem: array{id: string}}  $autoVariant
+     */
+    private function claimAutoCreatedVariant(ImportRun $importRun, Product $product, string $shopifyProductGid, array $autoVariant, VariantDiff $variantDiff, bool $hasLength): void
+    {
+        $expected = collect($this->optionValuesFor($variantDiff, $hasLength))
+            ->map(fn ($v) => $v['optionName'].'='.$v['name'])
+            ->sort()->values()->all();
+        $actual = collect($autoVariant['selectedOptions'])
+            ->map(fn ($v) => $v['name'].'='.$v['value'])
+            ->sort()->values()->all();
+
+        if ($expected !== $actual) {
+            throw new ShopifySyncException(
+                "La variante di default creata da Shopify per {$product->codice_articolo} non corrisponde a quella attesa "
+                .'(atteso: '.implode(', ', $expected).'; ricevuto: '.implode(', ', $actual).').'
+            );
+        }
+
+        $result = $this->client->call(
+            self::VARIANTS_BULK_UPDATE_MUTATION,
+            ['productId' => $shopifyProductGid, 'variants' => [array_filter([
+                'id' => $autoVariant['id'],
+                'price' => $variantDiff->staging['price'],
+                'barcode' => $variantDiff->codiceEan,
+                'inventoryItem' => $variantDiff->staging['cost'] !== null ? ['cost' => $variantDiff->staging['cost']] : null,
+            ], fn ($v) => $v !== null)]],
+            'productVariantsBulkUpdate',
+            $importRun->id,
+            $product->codice_articolo,
+        );
+        $this->assertSuccess($result, "Impostazione variante iniziale {$product->codice_articolo}");
+
+        $inventoryItemGid = $autoVariant['inventoryItem']['id'];
+
+        $product->variants()->create([
+            'shopify_variant_id' => ShopifyGid::toNumericId($autoVariant['id']),
+            'shopify_inventory_item_id' => ShopifyGid::toNumericId($inventoryItemGid),
+            'codice_ean' => $variantDiff->codiceEan,
+            'color' => $variantDiff->staging['color'],
+            'size' => $variantDiff->staging['size'],
+            'length' => $variantDiff->staging['length'],
+            'price' => $variantDiff->staging['price'],
+            'cost' => $variantDiff->staging['cost'],
+            'quantity' => $variantDiff->staging['quantity'],
+            'image_url' => $variantDiff->staging['image_url'],
+            'is_active' => true,
+            'last_seen_import_run_id' => $importRun->id,
+            'last_synced_at' => now(),
+        ]);
+
+        $this->setInventory($importRun, $product->codice_articolo, [[
+            'inventoryItemId' => $inventoryItemGid,
+            'locationId' => $this->locations->primaryLocationId($importRun->id),
+            'quantity' => (int) $variantDiff->staging['quantity'],
+        ]]);
     }
 
     private function update(ImportRun $importRun, ProductDiff $diff): void
@@ -177,7 +254,13 @@ class ProductSyncer
         $toRemove = array_values(array_filter($variantDiffs, fn (VariantDiff $v) => $v->action === 'remove'));
 
         if ($toCreate !== []) {
-            $this->createVariants($importRun, $product, $shopifyProductGid, $toCreate);
+            // "Lunghezza" e' un'opzione del PRODOTTO (fissata alla creazione): se una
+            // variante gia' esistente la usa, anche le nuove varianti aggiunte ora
+            // devono dichiararne un valore, non solo quelle di questa chiamata.
+            $hasLength = $product->variants()->whereNotNull('length')->exists()
+                || collect($toCreate)->contains(fn (VariantDiff $v) => ! empty($v->staging['length']));
+
+            $this->createVariants($importRun, $product, $shopifyProductGid, $toCreate, $hasLength);
         }
 
         if ($toUpdate !== []) {
@@ -237,13 +320,11 @@ class ProductSyncer
     /**
      * @param  list<VariantDiff>  $variantDiffs
      */
-    private function createVariants(ImportRun $importRun, Product $product, string $shopifyProductGid, array $variantDiffs): void
+    private function createVariants(ImportRun $importRun, Product $product, string $shopifyProductGid, array $variantDiffs, bool $hasLength): void
     {
         if ($variantDiffs === []) {
             return;
         }
-
-        $hasLength = collect($variantDiffs)->contains(fn (VariantDiff $v) => ! empty($v->staging['length']));
 
         $bulkInput = array_map(fn (VariantDiff $v) => [
             'price' => $v->staging['price'],
@@ -309,39 +390,47 @@ class ProductSyncer
             ['optionName' => 'Taglia', 'name' => $variantDiff->staging['size']],
         ];
 
-        if ($hasLength && ! empty($variantDiff->staging['length'])) {
-            $values[] = ['optionName' => 'Lunghezza', 'name' => $variantDiff->staging['length']];
+        if ($hasLength) {
+            $values[] = ['optionName' => 'Lunghezza', 'name' => $this->resolveLengthValue($variantDiff->staging['length'])];
         }
 
         return $values;
     }
 
     /**
+     * Se ANCHE UNA SOLA variante del prodotto valorizza LUNGHEZZA, Shopify la
+     * dichiara come opzione del prodotto: a quel punto OGNI variante deve avere
+     * un valore per quell'opzione, comprese quelle senza lunghezza nel CSV
+     * (altrimenti Shopify rifiuta con "You need to add option values for
+     * Lunghezza"). Il placeholder resta solo lato Shopify: in staging/canonico
+     * "length" continua a restare null quando non applicabile.
+     */
+    private function resolveLengthValue(?string $length): string
+    {
+        return ($length !== null && $length !== '') ? $length : 'Standard';
+    }
+
+    /**
      * @param  list<VariantDiff>  $variantDiffs
      */
-    private function buildProductOptions(array $variantDiffs): array
+    private function buildProductOptions(array $variantDiffs, bool $hasLength): array
     {
         $active = array_filter($variantDiffs, fn (VariantDiff $v) => $v->action !== 'remove');
-        $hasLength = collect($active)->contains(fn (VariantDiff $v) => ! empty($v->staging['length']));
 
-        $fields = $hasLength ? self::OPTION_FIELDS : array_slice(self::OPTION_FIELDS, 0, 2);
+        $options = collect([
+            'Colore' => collect($active)->map(fn (VariantDiff $v) => $v->staging['color'])->filter(fn ($v) => $v !== null && $v !== ''),
+            'Taglia' => collect($active)->map(fn (VariantDiff $v) => $v->staging['size'])->filter(fn ($v) => $v !== null && $v !== ''),
+            'Lunghezza' => $hasLength
+                ? collect($active)->map(fn (VariantDiff $v) => $this->resolveLengthValue($v->staging['length']))
+                : collect(),
+        ]);
 
-        $options = [];
-        foreach ($fields as $label => $field) {
-            $values = collect($active)
-                ->map(fn (VariantDiff $v) => $v->staging[$field] ?? null)
-                ->filter(fn ($value) => $value !== null && $value !== '')
-                ->unique()
-                ->values()
-                ->map(fn ($value) => ['name' => $value])
-                ->all();
-
-            if ($values !== []) {
-                $options[] = ['name' => $label, 'values' => $values];
-            }
-        }
-
-        return $options;
+        return $options
+            ->map(fn ($values) => $values->unique()->values())
+            ->filter(fn ($values) => $values->isNotEmpty())
+            ->map(fn ($values, $name) => ['name' => $name, 'values' => $values->map(fn ($v) => ['name' => $v])->all()])
+            ->values()
+            ->all();
     }
 
     private function resolveCollectionIds(?string $categoryPath, ImportRun $importRun): array
@@ -436,7 +525,12 @@ class ProductSyncer
     private const PRODUCT_CREATE_MUTATION = <<<'GQL'
         mutation ProductCreate($input: ProductInput!) {
             productCreate(input: $input) {
-                product { id }
+                product {
+                    id
+                    variants(first: 1) {
+                        nodes { id selectedOptions { name value } inventoryItem { id } }
+                    }
+                }
                 userErrors { field message }
             }
         }

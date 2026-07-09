@@ -34,12 +34,6 @@ class ProductSyncerTest extends TestCase
     {
         parent::setUp();
 
-        config([
-            'services.shopify.store_domain' => 'test-store.myshopify.com',
-            'services.shopify.access_token' => 'shpat_test',
-            'services.shopify.api_version' => '2025-01',
-        ]);
-
         $fixture = base_path('tests/Fixtures/csv/prodotti_web_sample.csv');
         Http::fake(['gestionale.eclisse.moda/*' => Http::response(file_get_contents($fixture), 200)]);
 
@@ -57,7 +51,19 @@ class ProductSyncerTest extends TestCase
 
     private function syncer(): ProductSyncer
     {
-        $client = new ShopifyGraphQLClient(retryDelayMs: 0);
+        // Dominio/token fittizi passati esplicitamente al costruttore, non via
+        // config(): cosi' questo test non puo' MAI colpire un negozio Shopify
+        // reale, a prescindere da cosa contiene il .env di chi lo esegue.
+        // (config() + Http::fake avrebbe dovuto bastare, ma un giro di test
+        // lanciato con delle credenziali vere nel .env ha comunque creato 9
+        // prodotti reali sul dev store prima che phpunit.xml azzerasse le
+        // variabili SHOPIFY_* per tutta la suite: doppia sicurezza da qui in poi.)
+        $client = new ShopifyGraphQLClient(
+            storeDomain: 'test-store.myshopify.com',
+            accessToken: 'shpat_test',
+            apiVersion: '2025-01',
+            retryDelayMs: 0,
+        );
 
         return new ProductSyncer($client, new LocationResolver($client), new CollectionResolver($client));
     }
@@ -80,8 +86,24 @@ class ProductSyncerTest extends TestCase
                         'userErrors' => [],
                     ]],
                 ], 200),
+                // Shopify crea un prodotto con opzioni gia' con UNA variante di
+                // default (combinazione del primo valore di ogni opzione): il fake
+                // la riproduce cosi' i test esercitano davvero il percorso di
+                // "claim" invece di quello (piu' semplice, e sbagliato) senza.
                 'ProductCreate' => Http::response([
-                    'data' => ['productCreate' => ['product' => ['id' => 'gid://shopify/Product/500'], 'userErrors' => []]],
+                    'data' => ['productCreate' => [
+                        'product' => [
+                            'id' => 'gid://shopify/Product/500',
+                            'variants' => ['nodes' => [[
+                                'id' => 'gid://shopify/ProductVariant/599',
+                                'selectedOptions' => collect($variables['input']['productOptions'] ?? [])
+                                    ->map(fn ($opt) => ['name' => $opt['name'], 'value' => $opt['values'][0]['name']])
+                                    ->all(),
+                                'inventoryItem' => ['id' => 'gid://shopify/InventoryItem/699'],
+                            ]]],
+                        ],
+                        'userErrors' => [],
+                    ]],
                 ], 200),
                 'ProductUpdate' => Http::response([
                     'data' => ['productUpdate' => ['product' => ['id' => $variables['input']['id']], 'userErrors' => []]],
@@ -137,6 +159,50 @@ class ProductSyncerTest extends TestCase
 
         $this->assertDatabaseHas('shopify_api_logs', ['operation_name' => 'productCreate', 'success' => true]);
         $this->assertDatabaseHas('shopify_api_logs', ['operation_name' => 'inventorySetQuantities', 'success' => true]);
+    }
+
+    /**
+     * '15228232' nel fixture ha 2 varianti: una con LUNGHEZZA valorizzata (quella
+     * "di default" auto-creata da Shopify insieme al prodotto) e una senza. Se
+     * "hasLength" non viene propagato correttamente alla seconda variante (creata
+     * separatamente via bulkCreate), Shopify la rifiuta perche' il prodotto ha
+     * gia' dichiarato "Lunghezza" come opzione ma quella variante non le da' un
+     * valore - il bug reale trovato testando contro il dev store.
+     */
+    public function test_una_variante_senza_lunghezza_riceve_comunque_un_valore_placeholder_per_lopzione(): void
+    {
+        $this->fakeSuccessfulShopifyResponses();
+
+        $diff = (new DiffEngine)->diffSingleProduct($this->run->id, '15228232');
+        $this->assertCount(2, $diff->variants);
+
+        $this->syncer()->sync($this->run, $diff);
+
+        $product = Product::where('codice_articolo', '15228232')->firstOrFail();
+        $this->assertCount(2, $product->variants);
+
+        Http::assertSent(function (Request $request) {
+            if ($this->operationName($request) !== 'ProductCreate') {
+                return true;
+            }
+
+            $options = collect($request->data()['variables']['input']['productOptions']);
+            $lunghezza = $options->firstWhere('name', 'Lunghezza');
+
+            return $lunghezza !== null
+                && collect($lunghezza['values'])->pluck('name')->all() === ['32.00', 'Standard'];
+        });
+
+        Http::assertSent(function (Request $request) {
+            if ($this->operationName($request) !== 'ProductVariantsBulkCreate') {
+                return true;
+            }
+
+            $variant = collect($request->data()['variables']['variants'])->first();
+            $lunghezza = collect($variant['optionValues'])->firstWhere('optionName', 'Lunghezza');
+
+            return $lunghezza !== null && $lunghezza['name'] === 'Standard';
+        });
     }
 
     public function test_un_prodotto_creato_fallisce_e_non_scrive_nulla_in_canonico(): void

@@ -29,7 +29,7 @@ class RunImportCommand extends Command
         $live = (bool) $this->option('live');
 
         if ($live) {
-            $this->warn('Modalita\' LIVE richiesta: al momento non e\' ancora implementata la sync reale verso Shopify, il run terminera\' con un errore esplicito.');
+            $this->warn('Modalita\' LIVE richiesta: verranno effettuate chiamate reali a Shopify (create/update/inventario).');
         } else {
             $this->info('Modalita\' dry-run (default): nessuna chiamata a Shopify verra\' effettuata.');
         }
@@ -72,6 +72,12 @@ class RunImportCommand extends Command
 
         if ($run->error_message) {
             $this->error("Errore: {$run->error_message}");
+        }
+
+        if ($run->status === 'syncing') {
+            $this->line('');
+            $this->line("Piano calcolato: {$run->products_created} nuovi, {$run->products_updated} aggiornati, {$run->products_removed} rimossi, {$run->products_unchanged} invariati.");
+            $this->line('I job sono in coda (driver "'.config('queue.default').'"): esegui "php artisan queue:work" per eseguirli davvero, oppure "php artisan queue:work --stop-when-empty" per processarli tutti e fermarsi.');
         }
 
         if (in_array($run->status, ['completed', 'completed_with_warnings'], true)) {

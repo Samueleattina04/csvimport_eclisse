@@ -29,6 +29,10 @@
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>
+        <!-- Mai leggere credenziali Shopify reali dal .env dello sviluppatore durante i test:
+             i test che ne hanno bisogno le impostano esplicitamente via config() nel proprio setUp. -->
+        <env name="SHOPIFY_STORE_DOMAIN" value=""/>
+        <env name="SHOPIFY_ADMIN_API_ACCESS_TOKEN" value=""/>
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>

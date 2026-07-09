@@ -68,7 +68,10 @@ class ShopifyGraphQLClient
         while (true) {
             $response = Http::withHeaders(['X-Shopify-Access-Token' => $token])
                 ->timeout(30)
-                ->post($url, ['query' => $query, 'variables' => $variables]);
+                // Shopify vuole "variables" come oggetto JSON: un array PHP vuoto
+                // si serializza come "[]" invece di "{}" e viene rifiutato con
+                // "Invalid variables parameter" (verificato contro il dev store reale).
+                ->post($url, ['query' => $query, 'variables' => $variables === [] ? new \stdClass : $variables]);
 
             $attempt++;
 

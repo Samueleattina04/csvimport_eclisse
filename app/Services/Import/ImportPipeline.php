@@ -7,6 +7,8 @@ use App\Models\ImportRun;
 use App\Services\Diff\DiffEngine;
 use App\Services\Diff\Dto\DiffResult;
 use App\Services\Diff\Dto\ProductDiff;
+use App\Services\Notification\NotificationDispatcher;
+use App\Services\Snapshot\SnapshotService;
 use Illuminate\Bus\Batch;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
@@ -31,16 +33,31 @@ class ImportPipeline
     public function __construct(
         private readonly StagingImporter $stagingImporter = new StagingImporter,
         private readonly DiffEngine $diffEngine = new DiffEngine,
+        private readonly SnapshotService $snapshotService = new SnapshotService,
+        private readonly NotificationDispatcher $notifier = new NotificationDispatcher,
     ) {}
 
     public function run(ImportRun $importRun): ImportRun
     {
         $this->stagingImporter->run($importRun);
-        $importRun->refresh();
 
-        // StagingImporter ha gia' marcato il run come 'failed' (errore o anomalia):
-        // niente da fare, il diff non ha senso su dati che non ci si fida ad usare.
+        return $this->continueAfterStaging($importRun->refresh());
+    }
+
+    /**
+     * Punto di ripresa condiviso con RollbackPipeline: quest'ultimo popola le
+     * tabelle di staging a partire da uno snapshot invece che da un CSV, poi
+     * consegna qui il run per il resto della pipeline (diff, dry-run/live,
+     * finalizzazione) senza duplicare nessuna di questa logica.
+     */
+    public function continueAfterStaging(ImportRun $importRun): ImportRun
+    {
+        // StagingImporter (o l'equivalente per il rollback) ha gia' marcato il
+        // run come 'failed' (errore o anomalia): niente da fare, il diff non ha
+        // senso su dati che non ci si fida ad usare.
         if ($importRun->status !== 'parsing') {
+            $this->notifier->notify($importRun);
+
             return $importRun;
         }
 
@@ -109,6 +126,12 @@ class ImportPipeline
             'finished_at' => now(),
             'duration_seconds' => $importRun->started_at ? now()->diffInSeconds($importRun->started_at) : null,
         ])->save();
+
+        // Solo run live: e' lo stato che finisce davvero su Shopify, quindi e'
+        // l'unico punto sensato da cui poter fare un rollback in futuro.
+        $this->snapshotService->snapshot($importRun);
+
+        $this->notifier->notify($importRun);
     }
 
     private function finalizeDryRun(ImportRun $importRun): void
@@ -120,6 +143,8 @@ class ImportPipeline
             'finished_at' => now(),
             'duration_seconds' => $importRun->started_at ? now()->diffInSeconds($importRun->started_at) : null,
         ])->save();
+
+        $this->notifier->notify($importRun);
     }
 
     private function logDiff(ImportRun $importRun, DiffResult $diffResult): void

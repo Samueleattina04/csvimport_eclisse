@@ -26,17 +26,40 @@ class NotificationDispatcher
             $this->dispatch($settings, $importRun, 'anomaly');
         }
 
-        $category = match ($importRun->status) {
-            'failed', 'completed_with_warnings' => 'failure',
-            'completed' => 'success',
-            default => null,
-        };
+        $category = $this->category($importRun);
 
         if ($category === 'failure' && $settings->notify_on_failure) {
             $this->dispatch($settings, $importRun, 'failure');
         } elseif ($category === 'success' && $settings->notify_on_success) {
             $this->dispatch($settings, $importRun, 'success');
         }
+    }
+
+    /**
+     * "completed_with_warnings" da solo NON basta per contare come fallimento:
+     * sui dati reali del gestionale, avvisi come "EAN duplicato" o "quantita'
+     * negativa" sono normalissimi e compaiono praticamente ogni notte, gia'
+     * gestiti in automatico dal parser. Trattarli come "fallimento" avrebbe
+     * significato un'email "Import con errori" ogni sera anche quando va
+     * tutto bene, con l'effetto di farla ignorare proprio nella notte in cui
+     * serve davvero. Conta come fallimento solo un run "failed", prodotti
+     * effettivamente falliti in sync, o righe scartate (livello "error", non
+     * "warning") durante il parsing.
+     */
+    private function category(ImportRun $importRun): ?string
+    {
+        if ($importRun->status === 'failed') {
+            return 'failure';
+        }
+
+        if (! in_array($importRun->status, ['completed', 'completed_with_warnings'], true)) {
+            return null;
+        }
+
+        $hasRealFailure = $importRun->products_failed > 0
+            || $importRun->logs()->where('level', 'error')->exists();
+
+        return $hasRealFailure ? 'failure' : 'success';
     }
 
     private function dispatch(SyncSetting $settings, ImportRun $importRun, string $category): void
@@ -88,9 +111,7 @@ class NotificationDispatcher
 
         $summary = match ($category) {
             'anomaly' => "Anomalia rilevata: {$importRun->anomaly_reason}",
-            'failure' => $importRun->status === 'failed'
-                ? ($importRun->error_message ?? 'Import fallito.')
-                : "{$importRun->products_failed} prodotti falliti su questo import.",
+            'failure' => $this->failureSummary($importRun),
             default => sprintf(
                 '%d nuovi, %d aggiornati, %d rimossi.',
                 $importRun->products_created,
@@ -102,5 +123,20 @@ class NotificationDispatcher
         $mode = $importRun->dry_run ? 'dry-run' : 'live';
 
         return "{$emoji} Import #{$importRun->id} ({$mode}): {$summary}";
+    }
+
+    private function failureSummary(ImportRun $importRun): string
+    {
+        if ($importRun->status === 'failed') {
+            return $importRun->error_message ?? 'Import fallito.';
+        }
+
+        if ($importRun->products_failed > 0) {
+            return "{$importRun->products_failed} prodotti falliti su questo import.";
+        }
+
+        $errorRows = $importRun->logs()->where('level', 'error')->count();
+
+        return "{$errorRows} righe scartate durante l'analisi del CSV.";
     }
 }

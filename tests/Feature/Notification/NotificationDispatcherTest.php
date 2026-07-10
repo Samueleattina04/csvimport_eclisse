@@ -123,4 +123,54 @@ class NotificationDispatcherTest extends TestCase
 
         Mail::assertSent(ImportRunReportMail::class, fn (ImportRunReportMail $mail) => $mail->category === 'success');
     }
+
+    public function test_completato_con_soli_avvisi_benigni_conta_come_successo(): void
+    {
+        Mail::fake();
+
+        SyncSetting::current()->update([
+            'notification_email' => 'ops@eclisse.moda',
+            'notify_on_success' => true,
+            'notify_on_failure' => true,
+        ]);
+
+        $run = ImportRun::create([
+            'trigger_type' => 'scheduled',
+            'status' => 'completed_with_warnings',
+            'dry_run' => true,
+            'products_failed' => 0,
+        ]);
+        $run->logs()->create(['level' => 'warning', 'message' => "EAN duplicato, quantita' sommate."]);
+
+        (new NotificationDispatcher)->notify($run);
+
+        // Avvisi come EAN duplicati sono normali sui dati reali del gestionale:
+        // non devono generare un'email "fallimento" ogni notte.
+        Mail::assertSent(ImportRunReportMail::class, fn (ImportRunReportMail $mail) => $mail->category === 'success');
+        Mail::assertSentCount(1);
+    }
+
+    public function test_completato_con_righe_scartate_conta_come_fallimento(): void
+    {
+        Mail::fake();
+
+        SyncSetting::current()->update([
+            'notification_email' => 'ops@eclisse.moda',
+            'notify_on_success' => true,
+            'notify_on_failure' => true,
+        ]);
+
+        $run = ImportRun::create([
+            'trigger_type' => 'scheduled',
+            'status' => 'completed_with_warnings',
+            'dry_run' => true,
+            'products_failed' => 0,
+        ]);
+        $run->logs()->create(['level' => 'error', 'message' => 'Riga senza CODICE ARTICOLO, scartata.']);
+
+        (new NotificationDispatcher)->notify($run);
+
+        Mail::assertSent(ImportRunReportMail::class, fn (ImportRunReportMail $mail) => $mail->category === 'failure');
+        Mail::assertSentCount(1);
+    }
 }

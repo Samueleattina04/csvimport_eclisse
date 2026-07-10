@@ -26,12 +26,21 @@ return Application::configure(basePath: dirname(__DIR__))
         // (un processo nuovo ogni minuto via cron, niente demone persistente):
         // cambiarlo in Impostazioni si riflette dal giro schedulato successivo,
         // senza toccare configurazione cron o riavviare nulla.
+        //
+        // "Europe/Rome" esplicito su entrambi i job: l'app salva tutto in UTC
+        // (config('app.timezone'), corretto per i timestamp nel database), ma
+        // l'orario scelto in Impostazioni e' pensato da un operatore in Italia
+        // ("le 3 di notte" intende le 3 ora italiana, non UTC) - senza questo,
+        // lo scheduler interpreterebbe "03:00" come UTC, cioe' le 5 (o le 4)
+        // ora italiana a seconda dell'ora legale.
         $schedule->command('import:scheduled-run')
             ->dailyAt(SyncSetting::current()->scheduled_run_time)
+            ->timezone('Europe/Rome')
             ->withoutOverlapping();
 
         $schedule->command('backup:run')
             ->dailyAt('03:30')
+            ->timezone('Europe/Rome')
             ->withoutOverlapping();
 
         // Simula un worker persistente su hosting che non ne permette uno

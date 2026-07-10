@@ -145,6 +145,25 @@ class ShopifyGraphQLClientTest extends TestCase
         ]);
     }
 
+    /**
+     * Visto contro il dev store reale: uno store sospeso risponde 404 con
+     * {"errors": "Not Found"} - una stringa nuda, non la lista di oggetti che
+     * ShopifyMutationResult si aspetta. Senza normalizzazione questo mandava
+     * in errore di tipo il client invece di riportare un messaggio leggibile.
+     */
+    public function test_gestisce_una_risposta_con_errors_come_stringa_invece_che_lista(): void
+    {
+        Http::fake([
+            'test-store.myshopify.com/*' => Http::response(['errors' => 'Not Found'], 404),
+        ]);
+
+        $result = $this->client()->call('query {...}', [], 'shopQuery');
+
+        $this->assertFalse($result->success);
+        $this->assertSame(404, $result->httpStatus);
+        $this->assertSame('Not Found', $result->firstErrorMessage());
+    }
+
     public function test_smette_di_riprovare_oltre_il_numero_massimo_di_tentativi(): void
     {
         Http::fake([

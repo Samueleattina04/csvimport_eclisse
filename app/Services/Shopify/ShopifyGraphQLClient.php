@@ -102,7 +102,7 @@ class ShopifyGraphQLClient
     private function parseResponse(Response $response): ShopifyMutationResult
     {
         $body = $response->json() ?? [];
-        $errors = $body['errors'] ?? [];
+        $errors = $this->normalizeErrors($body['errors'] ?? []);
         $data = $body['data'] ?? null;
         $userErrors = $this->extractUserErrors($data);
         $wasThrottled = $this->wasThrottled($response);
@@ -114,6 +114,31 @@ class ShopifyGraphQLClient
             userErrors: $userErrors,
             httpStatus: $response->status(),
             wasThrottled: $wasThrottled,
+        );
+    }
+
+    /**
+     * Normalmente "errors" e' una lista di oggetti {"message": ...}, ma non
+     * e' garantito: visto contro il dev store reale, uno store sospeso
+     * risponde 404 con {"errors": "Not Found"} (una stringa nuda, non una
+     * lista) - senza normalizzare qui, ShopifyMutationResult va in errore di
+     * tipo invece di riportare un messaggio d'errore leggibile.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function normalizeErrors(mixed $errors): array
+    {
+        if (is_string($errors)) {
+            return [['message' => $errors]];
+        }
+
+        if (! is_array($errors)) {
+            return [];
+        }
+
+        return array_map(
+            fn ($error) => is_array($error) ? $error : ['message' => (string) $error],
+            array_values($errors),
         );
     }
 
